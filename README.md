@@ -7,15 +7,10 @@ colour preservation.  The resulting SVGs are useful as:
 - **Fritzing** part SVG creation (icon / breadboard views)
 - **Datasheet-style** technical illustrations
 
-Two implementations live here:
-
-| Script | Approach | Colour | Speed | Quality |
-|--------|----------|--------|-------|---------|
-| `step2svg.py`  | Hidden-Line Removal (HLR) projection | Monochrome outlines only | Slow | Messy edges, no fill |
-| `step2svg2.py` | XCAF tessellation + painter's algorithm | Full per-face colour | Fast | Clean filled regions |
-
-**`step2svg2.py` is the recommended one** — it was written after `step2svg.py`
-proved too unreliable for production use.
+Uses **XCAF tessellation + painter's algorithm** — loads the STEP file
+via OpenCascade's XCAF document layer (preserving per-face colours),
+tessellates into triangles, groups them by colour, culls back-faces,
+and paints back-to-front as filled SVG `<path>` elements.
 
 ---
 
@@ -27,34 +22,28 @@ Python 3.10+ with `cadquery-ocp` (provides the `OCP` OpenCascade bindings):
 pip install cadquery-ocp
 ```
 
-`step2svg.py` also requires `ezdxf` for HLR output:
-
-```bash
-pip install ezdxf
-```
-
 ---
 
-## Quick start — `step2svg2.py`
+## Quick start
 
 ```bash
 # Render a STEP model from above (default)
-python3 step2svg2.py part.step -o part.svg
+python3 step2svg.py part.step -o part.svg
 
 # PCBdraw-ready output (keeps origin at 0,0, Y matches KiCad PCB coords)
-python3 step2svg2.py part.step --pcbdraw -o part.svg
+python3 step2svg.py part.step --pcbdraw -o part.svg
 
 # Finer mesh for curved parts
-python3 step2svg2.py part.step --deflection 0.02 --angle 0.2
+python3 step2svg.py part.step --deflection 0.02 --angle 0.2
 
 # View from below
-python3 step2svg2.py part.step --bottom -o part_bottom.svg
+python3 step2svg.py part.step --bottom -o part_bottom.svg
 
 # Include back-facing triangles (full silhouette, bigger SVG)
-python3 step2svg2.py part.step --all-faces
+python3 step2svg.py part.step --all-faces
 
 # Add thin outline strokes
-python3 step2svg2.py part.step --stroke "#222" --stroke-width 0.05
+python3 step2svg.py part.step --stroke "#222" --stroke-width 0.05
 ```
 
 ### `--pcbdraw` mode
@@ -70,7 +59,7 @@ consume as a component template:
 
 ---
 
-## How `step2svg2.py` works
+## How it works
 
 1. **Load STEP via XCAF** — `STEPCAFControl_Reader` loads the model into
    an XCAF document so per-face colours survive the import.
@@ -120,34 +109,11 @@ corner coincides with shape (0, 0).  See the `--origin-marker` /
 
 ---
 
-## `step2svg.py` (v1 — HLR)
-
-The original approach used OpenCASCADE's Hidden-Line Removal projection:
-
-```bash
-python3 step2svg.py part.step -o part.svg                 # top view
-python3 step2svg.py part.step -o part.svg --view front     # front
-python3 step2svg.py part.step -o part.svg --view isometric # ISO
-python3 step2svg.py part.step -o part.svg --outline        # outer outline only
-python3 step2svg.py part.step -o part.svg --minimal        # sharp edges only
-```
-
-Known limitations:
-- Produces open edge paths, not filled regions
-- No colour information
-- Slow on complex models
-- Prone to missing edges and gaps
-
-It remains here for reference and for HLR-specific use cases where
-wireframe output is acceptable.
-
----
-
 ## `build_pcbdraw_lib.py` usage
 
 A companion script for batch-converting a list of footprints into a
 PCBdraw library lives in the
 [p4hil](https://github.com/tannewt/p4hil) project.  It calls
-`step2svg2.py --pcbdraw` for each entry, generates front + back SVGs,
+`step2svg.py --pcbdraw` for each entry, generates front + back SVGs,
 and falls back to synthetic outlines for footprints without STEP
 models.
