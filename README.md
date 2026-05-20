@@ -109,11 +109,42 @@ corner coincides with shape (0, 0).  See the `--origin-marker` /
 
 ---
 
+## `build_kicad3d_lib.py` — convert all KiCad 3D models
+
+automatically convert every `.step` file shipped with a standard KiCad
+install into a PCBdraw component library:
+
+```bash
+# Full build (7000+ models, ~13 minutes with 8 workers)
+python3 build_kicad3d_lib.py --workers 8
+
+# Quick test with one library
+python3 build_kicad3d_lib.py --filter "Connector_PinHeader_2.54mm"
+
+# Resume a partial build (skips already-converted files)
+python3 build_kicad3d_lib.py --resume
+
+# Preview what will be converted
+python3 build_kicad3d_lib.py --dry-run
+```
+
+The output goes to `./kicad-3d/` (or a custom path with `--out-dir`).
+Each library directory is named after the KiCad footprint library
+nickname (e.g. `Connector_PinHeader_2.54mm/`), matching what
+PCBdraw resolves from `footprint.GetFPID().GetLibNickname()`.
+
+Both front (`.svg`) and back (`.back.svg`, Y-mirrored) variants are
+generated for every model.
+
+To use the library with PCBdraw:
+
+```bash
+cd /home/tannewt/repos/step2svg
+pcbdraw plot --libs KiCAD-base,kicad-3d board.kicad_pcb out.svg
+```
+
 ## `build_pcbdraw_lib.py` usage
 
-A companion script for batch-converting a list of footprints into a
-PCBdraw library lives in the
-[p4hil](https://github.com/tannewt/p4hil) project.  It calls
-`step2svg.py --pcbdraw` for each entry, generates front + back SVGs,
-and falls back to synthetic outlines for footprints without STEP
-models.
+A companion script for batch-converting a specific list of footprints
+into a PCBdraw library lives in the
+[p4hil](https://github.com/tannewt/p4hil) project.
