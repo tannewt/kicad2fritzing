@@ -58,6 +58,9 @@ STEP2SVG       = SCRIPT_DIR / "step2svg.py"
 BUILD_LIB      = SCRIPT_DIR / "build_kicad3d_lib.py"
 KICAD3D_LIB    = SCRIPT_DIR / "kicad-3d"           # PCBdraw library dir
 
+# Fritzing coordinate system: 100 units = 1 inch = 25.4 mm
+FRITZING_SCALE  = 100.0 / 25.4
+
 
 # ══════════════════════════════════════════════════════════════════════════
 #  KiCad PCB S-expression parser
@@ -306,15 +309,14 @@ def is_connector(fp):
 #  SVG helpers
 # ══════════════════════════════════════════════════════════════════════════
 
-def svg_header(width, height, viewbox=None):
+def svg_header(width_in, height_in, viewbox=None):
+    """width/height in inches."""
     if viewbox is None:
-        viewbox = f"0 0 {width} {height}"
-    w_px = width * 96 / 25.4
-    h_px = height * 96 / 25.4
+        viewbox = f"0 0 {width_in * 100:.4f} {height_in * 100:.4f}"
     return (f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<svg xmlns="http://www.w3.org/2000/svg"\n'
             f'     xmlns:xlink="http://www.w3.org/1999/xlink"\n'
-            f'     width="{w_px:.1f}px" height="{h_px:.1f}px"\n'
+            f'     width="{width_in:.4f}in" height="{height_in:.4f}in"\n'
             f'     viewBox="{viewbox}">\n')
 
 
@@ -375,48 +377,55 @@ def wrap_pcbdraw_svg_for_fritzing(pcbdraw_svg_path: Path, output_path: Path,
         vb_x = vb_y = 0.0
         vb_w = vb_h = 100.0
 
-    margin = 5
-    svg_w = vb_w + 2 * margin
-    svg_h = vb_h + 2 * margin
+    scale = FRITZING_SCALE
+    margin_mm = 5
+    # Compute viewBox origin in Fritzing units (includes margin)
+    off_x = (vb_x - margin_mm) * scale
+    off_y = (vb_y - margin_mm) * scale
+    svg_w = vb_w * scale + 2 * margin_mm * scale
+    svg_h = vb_h * scale + 2 * margin_mm * scale
 
-    result = svg_header(svg_w, svg_h,
-                        viewbox=f"{vb_x - margin} {vb_y - margin} {svg_w} {svg_h}")
+    # Normalized viewBox starting at (0, 0) — Fritzing units, 100 = 1 inch
+    result = svg_header(svg_w / 100, svg_h / 100,
+                        viewbox=f"0 0 {svg_w:.4f} {svg_h:.4f}")
 
-    # Board fill
+    # Board fill (in Fritzing units, shifted to viewBox origin)
+    board_x_f = pcb.board_x * scale - off_x
+    board_y_f = pcb.board_y * scale - off_y
+    board_w_f = pcb.board_w * scale
+    board_h_f = pcb.board_h * scale
     result += f'  <g id="boardFill">\n'
-    result += f'    <rect x="{vb_x:.4f}" y="{vb_y:.4f}" '
-    result += f'width="{vb_w:.4f}" height="{vb_h:.4f}" '
+    result += f'    <rect x="{board_x_f:.4f}" y="{board_y_f:.4f}" '
+    result += f'width="{board_w_f:.4f}" height="{board_h_f:.4f}" '
     result += f'fill="#2b5f82" stroke="none"/>\n'
     result += f'  </g>\n'
 
-    # Copper1 — wrap the entire pcbdraw rendering
-    result += f'  <g id="copper1">\n'
+    # Copper1 — PcbDraw content, transform from mm to Fritzing units
+    result += f'  <g id="copper1" transform="translate({-off_x:.4f}, {-off_y:.4f}) scale({scale:.6f})">\n'
     result += inner
     result += f'  </g>\n'
 
-    # Copper0 — empty (bottom copper is not rendered in front view)
-    result += f'  <g id="copper0"/>\n'
+    # Copper0, Silkscreen — empty layers at same scale
+    result += f'  <g id="copper0" transform="translate({-off_x:.4f}, {-off_y:.4f}) scale({scale:.6f})"/>\n'
+    result += f'  <g id="silkscreen" transform="translate({-off_x:.4f}, {-off_y:.4f}) scale({scale:.6f})"/>\n'
 
-    # Silkscreen overlay
-    result += f'  <g id="silkscreen"/>\n'
-
-    # Connector pin markers
+    # Connector pin markers (in Fritzing units, shifted to viewBox origin)
     conn_idx = 0
     result += f'  <g id="connectors">\n'
     for fp in pcb.footprints:
         if not is_connector(fp):
             continue
         for pad in fp['pads']:
-            # Apply footprint rotation to pad position.
-            # Negate to match PcbDraw's rendering convention.
             angle_rad = math.radians(-fp.get('rot', 0))
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
-            px = fp['x'] + pad['x'] * cos_a - pad['y'] * sin_a
-            py = fp['y'] + pad['x'] * sin_a + pad['y'] * cos_a
+            px_mm = fp['x'] + pad['x'] * cos_a - pad['y'] * sin_a
+            py_mm = fp['y'] + pad['x'] * sin_a + pad['y'] * cos_a
+            px = px_mm * scale - off_x
+            py = py_mm * scale - off_y
             result += (f'    <rect id="connector{conn_idx}pin" '
-                       f'x="{px - 0.05:.4f}" y="{py - 0.05:.4f}" '
-                       f'width="0.1" height="0.1" '
+                       f'x="{px - 0.2:.4f}" y="{py - 0.2:.4f}" '
+                       f'width="0.4" height="0.4" '
                        f'fill="none" stroke="none" '
                        f'visibility="hidden"/>\n')
             conn_idx += 1
@@ -437,7 +446,8 @@ def generate_schematic_svg(pcb: PCBParser, output_path: Path,
     board_h = 80
     margin = 5
 
-    svg = svg_header(board_w + 2 * margin, board_h + 2 * margin,
+    svg = svg_header((board_w + 2 * margin) / 100.0,
+                     (board_h + 2 * margin) / 100.0,
                      viewbox=f"{-margin} {-margin} {board_w + 2 * margin} {board_h + 2 * margin}")
 
     # Board box
@@ -480,7 +490,7 @@ def generate_schematic_svg(pcb: PCBParser, output_path: Path,
 
 def generate_icon_svg(output_path: Path):
     """Generate a simple icon view SVG."""
-    svg = svg_header(64, 64, viewbox="0 0 64 64")
+    svg = svg_header(64.0 / 100, 64.0 / 100, viewbox="0 0 64 64")
     svg += make_svg_rect(4, 4, 56, 56, fill='#2a7a2a', stroke='#1a5a1a', sw=1, rx=3)
     svg += make_svg_text(7, 30, 'PCB', size=8, fill='#fff')
     svg += make_svg_text(7, 44, 'Board', size=6, fill='#cfc')
@@ -638,6 +648,8 @@ def main():
                    help='Base filename for outputs (default: board stem)')
     p.add_argument('--temp-dir', type=Path, default=None,
                    help='Temporary working directory (default: output_dir/tmp)')
+    p.add_argument('--raw-svg', type=Path, default=None,
+                   help='Use existing raw PcbDraw SVG instead of running pcbdraw')
     p.add_argument('--extra', nargs=argparse.REMAINDER, default=[],
                    help='Extra args passed through to pcbdraw plot '
                         '(everything after "--" on the command line)')
@@ -675,26 +687,32 @@ def main():
         subprocess.run([sys.executable, str(BUILD_LIB)],
                        cwd=str(SCRIPT_DIR), check=True)
 
-    # ── Step 3: Generate board SVG via PcbDraw ─────────────────────────
-    raw_svg = temp_dir / f'{base}_front.raw.svg'
-    print(f"\n→ Running PcbDraw plot (front side)...")
-    cmd = [args.pcbdraw, 'plot', '--libs', args.libs]
-    if args.style:
-        cmd += ['--style', args.style]
-    extra = list(args.extra)
-    if extra and extra[0] == '--':
-        extra = extra[1:]
-    cmd += extra
-    cmd += [str(kicad_file), str(raw_svg)]
+    # ── Step 3: Generate board SVG via PcbDraw (or use existing) ────
+    if args.raw_svg:
+        raw_svg = args.raw_svg.resolve()
+        if not raw_svg.exists():
+            sys.exit(f"Error: raw SVG not found: {raw_svg}")
+        print(f"  Using existing raw SVG: {raw_svg}")
+    else:
+        raw_svg = temp_dir / f'{base}_front.raw.svg'
+        print(f"\n→ Running PcbDraw plot (front side)...")
+        cmd = [args.pcbdraw, 'plot', '--libs', args.libs]
+        if args.style:
+            cmd += ['--style', args.style]
+        extra = list(args.extra)
+        if extra and extra[0] == '--':
+            extra = extra[1:]
+        cmd += extra
+        cmd += [str(kicad_file), str(raw_svg)]
 
-    try:
-        subprocess.run(cmd, cwd=str(SCRIPT_DIR), check=True,
-                       capture_output=True, text=True)
-        print(f"  PcbDraw SVG: {raw_svg}")
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"PcbDraw failed (exit {e.returncode}):\n{e.stderr}")
-    except FileNotFoundError:
-        sys.exit(f"pcbdraw not found at {args.pcbdraw}")
+        try:
+            subprocess.run(cmd, cwd=str(SCRIPT_DIR), check=True,
+                           capture_output=True, text=True)
+            print(f"  PcbDraw SVG: {raw_svg}")
+        except subprocess.CalledProcessError as e:
+            sys.exit(f"PcbDraw failed (exit {e.returncode}):\n{e.stderr}")
+        except FileNotFoundError:
+            sys.exit(f"pcbdraw not found at {args.pcbdraw}")
 
     # ── Step 4: Build Fritzing part SVGs ───────────────────────────────
     print(f"\n→ Generating Fritzing part in: {output_dir}")
