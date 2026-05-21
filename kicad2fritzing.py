@@ -297,12 +297,106 @@ def is_connector(fp):
     connector_keywords = [
         'PinHeader', 'Connector', 'BarrelJack', 'USB', 'HDMI', 'DSUB',
         'TerminalBlock', 'ScrewTerminal', 'AudioJack', 'RJ',
-        'Button', 'Switch', 'Jumper', 'TestPoint',
+        'JST', 'Jumper', 'TestPoint',
     ]
     for kw in connector_keywords:
         if kw in name:
             return True
     return False
+
+
+def get_connector_type(fp):
+    """Determine Fritzing connector type based on footprint name."""
+    name = fp['name']
+    if 'BarrelJack' in name:
+        return 'barrel_jack'
+    if 'USB' in name:
+        return 'usb'
+    if 'RJ' in name:
+        return 'ethernet'
+    if 'JST' in name:
+        return 'stemma'
+    return 'male'
+
+
+def has_single_connector(fp):
+    """Check if a footprint should have one connector (USB, BarrelJack,
+    RJ/ethernet, JST etc.) rather than one per pad (PinHeaders,
+    TerminalBlocks, etc.)."""
+    name = fp['name']
+    return ('BarrelJack' in name or 'USB' in name
+            or 'RJ' in name or 'JST' in name)
+
+
+def is_stacked_usb(fp):
+    """Check if a USB footprint is a stacked (dual-port) connector."""
+    return 'USB' in fp['name'] and 'Stacked' in fp['name']
+
+
+def get_connector_centroids(fp):
+    """Return list of (label_suffix, cx_mm, cy_mm) tuples.
+
+    For most single-connector footprints (USB, BarrelJack, RJ, JST) this
+    returns one entry at the centroid of all non-NPTH pads.
+
+    For stacked USB connectors it returns two entries, one per port,
+    split by pad Y position.
+    """
+    angle_rad = math.radians(-fp.get('rot', 0))
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+
+    signal_pads = [p for p in fp['pads'] if p['type'] != 'np_thru_hole']
+    if not signal_pads:
+        return [('', fp['x'], fp['y'])]
+
+    if is_stacked_usb(fp):
+        # Split into two groups by Y position
+        pad_ys = [p['y'] for p in signal_pads]
+        mid_y = (min(pad_ys) + max(pad_ys)) / 2.0
+        groups = [], []
+        for p in signal_pads:
+            groups[0 if p['y'] < mid_y else 1].append(p)
+        result = []
+        for i, group in enumerate(groups):
+            if not group:
+                continue
+            sx = sum(p['x'] * cos_a - p['y'] * sin_a for p in group) / len(group)
+            sy = sum(p['x'] * sin_a + p['y'] * cos_a for p in group) / len(group)
+            result.append((f' Port{i+1}', fp['x'] + sx, fp['y'] + sy))
+        return result
+
+    # Single port — centroid of all signal pads
+    sx = sum(p['x'] * cos_a - p['y'] * sin_a for p in signal_pads) / len(signal_pads)
+    sy = sum(p['x'] * sin_a + p['y'] * cos_a for p in signal_pads) / len(signal_pads)
+    return [('', fp['x'] + sx, fp['y'] + sy)]
+
+
+
+def footprint_connector_centroid(fp):
+    """Compute the centroid of all (non-npth) pads in Fritzing SVG units.
+
+    Returns (cx, cy) in Fritzing SVG coordinates (100 units = 1 inch).
+    """
+    angle_rad = math.radians(-fp.get('rot', 0))
+    cos_a = math.cos(angle_rad)
+    sin_a = math.sin(angle_rad)
+    sum_x = 0.0
+    sum_y = 0.0
+    count = 0
+    for pad in fp['pads']:
+        if pad['type'] == 'np_thru_hole':
+            continue
+        sum_x += pad['x'] * cos_a - pad['y'] * sin_a
+        sum_y += pad['x'] * sin_a + pad['y'] * cos_a
+        count += 1
+    if count > 0:
+        cx_mm = fp['x'] + sum_x / count
+        cy_mm = fp['y'] + sum_y / count
+    else:
+        cx_mm = fp['x']
+        cy_mm = fp['y']
+    return cx_mm, cy_mm
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -415,20 +509,33 @@ def wrap_pcbdraw_svg_for_fritzing(pcbdraw_svg_path: Path, output_path: Path,
     for fp in pcb.footprints:
         if not is_connector(fp):
             continue
-        for pad in fp['pads']:
-            angle_rad = math.radians(-fp.get('rot', 0))
-            cos_a = math.cos(angle_rad)
-            sin_a = math.sin(angle_rad)
-            px_mm = fp['x'] + pad['x'] * cos_a - pad['y'] * sin_a
-            py_mm = fp['y'] + pad['x'] * sin_a + pad['y'] * cos_a
-            px = px_mm * scale - off_x
-            py = py_mm * scale - off_y
-            result += (f'    <rect id="connector{conn_idx}pin" '
-                       f'x="{px - 0.2:.4f}" y="{py - 0.2:.4f}" '
-                       f'width="0.4" height="0.4" '
-                       f'fill="none" stroke="none" '
-                       f'visibility="hidden"/>\n')
-            conn_idx += 1
+        if has_single_connector(fp):
+            # One (or more for stacked USB) pin markers at centroids
+            for suffix, cx_mm, cy_mm in get_connector_centroids(fp):
+                px = cx_mm * scale - off_x
+                py = cy_mm * scale - off_y
+                result += (f'    <rect id="connector{conn_idx}pin" '
+                           f'x="{px - 0.2:.4f}" y="{py - 0.2:.4f}" '
+                           f'width="0.4" height="0.4" '
+                           f'fill="none" stroke="none" '
+                           f'visibility="hidden"/>\n')
+                conn_idx += 1
+        else:
+            # One pin marker per pad (PinHeaders, TerminalBlocks, etc.)
+            for pad in fp['pads']:
+                angle_rad = math.radians(-fp.get('rot', 0))
+                cos_a = math.cos(angle_rad)
+                sin_a = math.sin(angle_rad)
+                px_mm = fp['x'] + pad['x'] * cos_a - pad['y'] * sin_a
+                py_mm = fp['y'] + pad['x'] * sin_a + pad['y'] * cos_a
+                px = px_mm * scale - off_x
+                py = py_mm * scale - off_y
+                result += (f'    <rect id="connector{conn_idx}pin" '
+                           f'x="{px - 0.2:.4f}" y="{py - 0.2:.4f}" '
+                           f'width="0.4" height="0.4" '
+                           f'fill="none" stroke="none" '
+                           f'visibility="hidden"/>\n')
+                conn_idx += 1
     result += f'  </g>\n'
 
     result += svg_footer()
@@ -465,23 +572,44 @@ def generate_schematic_svg(pcb: PCBParser, output_path: Path,
 
     for conn in connectors:
         pins = [p for p in conn['pads'] if p['type'] != 'np_thru_hole']
-        for pad in pins:
-            if pin_count >= max_pins:
-                break
-            if pin_count < max_pins // 2:
-                px, py = 0, 10 + pin_count * 3.5
-                svg += make_svg_line(px, py, px - 3, py, stroke='#888', sw=0.3)
-                svg += make_svg_text(px - 3.2, py + 0.5,
-                                     f"{conn['ref']}.{pad['name']}",
-                                     size=1.2, fill='#666', anchor='end')
-            else:
-                py = 10 + (pin_count - max_pins // 2) * 3.5
-                svg += make_svg_line(board_w, py, board_w + 3, py,
-                                     stroke='#888', sw=0.3)
-                svg += make_svg_text(board_w + 0.5, py + 0.5,
-                                     f"{conn['ref']}.{pad['name']}",
-                                     size=1.2, fill='#666', anchor='start')
-            pin_count += 1
+        if has_single_connector(conn):
+            # One pin per port (stacked USB gets two)
+            for suffix, _, _ in get_connector_centroids(conn):
+                if pin_count >= max_pins:
+                    break
+                label = f"{conn['ref']}{suffix} ({get_connector_type(conn)})"
+                if pin_count < max_pins // 2:
+                    px, py = 0, 10 + pin_count * 3.5
+                    svg += make_svg_line(px, py, px - 3, py, stroke='#888', sw=0.3)
+                    svg += make_svg_text(px - 3.2, py + 0.5,
+                                         label,
+                                         size=1.2, fill='#666', anchor='end')
+                else:
+                    py = 10 + (pin_count - max_pins // 2) * 3.5
+                    svg += make_svg_line(board_w, py, board_w + 3, py,
+                                         stroke='#888', sw=0.3)
+                    svg += make_svg_text(board_w + 0.5, py + 0.5,
+                                         label,
+                                         size=1.2, fill='#666', anchor='start')
+                pin_count += 1
+        else:
+            for pad in pins:
+                if pin_count >= max_pins:
+                    break
+                if pin_count < max_pins // 2:
+                    px, py = 0, 10 + pin_count * 3.5
+                    svg += make_svg_line(px, py, px - 3, py, stroke='#888', sw=0.3)
+                    svg += make_svg_text(px - 3.2, py + 0.5,
+                                         f"{conn['ref']}.{pad['name']}",
+                                         size=1.2, fill='#666', anchor='end')
+                else:
+                    py = 10 + (pin_count - max_pins // 2) * 3.5
+                    svg += make_svg_line(board_w, py, board_w + 3, py,
+                                         stroke='#888', sw=0.3)
+                    svg += make_svg_text(board_w + 0.5, py + 0.5,
+                                         f"{conn['ref']}.{pad['name']}",
+                                         size=1.2, fill='#666', anchor='start')
+                pin_count += 1
 
     svg += svg_footer()
     with open(output_path, 'w') as f:
@@ -505,7 +633,8 @@ def generate_icon_svg(output_path: Path):
 
 def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
                  svg_bb: str, svg_sch: str,
-                 svg_ico: str, svg_pcb: str) -> str:
+                 svg_ico: str, svg_pcb: str,
+                 overrides: dict = None) -> str:
     """Generate the Fritzing FZP part descriptor XML."""
     module_id = f"{name}_Board_v1"
 
@@ -516,21 +645,83 @@ def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
     for fp in pcb.footprints:
         if not is_connector(fp):
             continue
-        for pad in fp['pads']:
-            label = f"{fp['ref']}.{pad['name']}"
-            cid = f'connector{conn_idx}'
-            net = pad.get('net', '')
-            connectors.append({
-                'id': cid,
-                'name': label,
-                'type': 'male',
-                'description': f'{fp["ref"]} pin {pad["name"]} ({fp["value"]})',
-                'svg_id': f'{cid}pin',
-                'net': net,
-            })
-            if net:
-                net_connectors.setdefault(net, []).append(cid)
-            conn_idx += 1
+        conn_type = get_connector_type(fp)
+        if has_single_connector(fp):
+            # One connector per port (USB, JST, etc.; stacked USB gets two)
+            for suffix, cx_mm, cy_mm in get_connector_centroids(fp):
+                cid = f'connector{conn_idx}'
+                label = f"{fp['ref']}{suffix}"
+                connectors.append({
+                    'id': cid,
+                    'name': label,
+                    'type': conn_type,
+                    'description': f'{fp["ref"]}{suffix} ({fp["value"]})',
+                    'svg_id': f'{cid}pin',
+                    'net': '',
+                })
+                conn_idx += 1
+        else:
+            # One connector per pad (PinHeaders, TerminalBlocks, etc.)
+            for pad in fp['pads']:
+                label = f"{fp['ref']}.{pad['name']}"
+                cid = f'connector{conn_idx}'
+                net = pad.get('net', '')
+                connectors.append({
+                    'id': cid,
+                    'name': label,
+                    'type': conn_type,
+                    'description': f'{fp["ref"]} pin {pad["name"]} ({fp["value"]})',
+                    'svg_id': f'{cid}pin',
+                    'net': net,
+                })
+                if net:
+                    net_connectors.setdefault(net, []).append(cid)
+                conn_idx += 1
+
+    # ── Apply overrides to connector names ──────────────────────────
+    if overrides:
+        # Per-connector pin renames (highest priority): "J4.5" -> "T4_Arduino"
+        pin_renames = overrides.get('connector_pin_renames', {})
+        renamed = set()
+        for conn in connectors:
+            if conn['name'] in pin_renames:
+                conn['name'] = pin_renames[conn['name']]
+                renamed.add(id(conn))
+
+        # Net-based pattern overrides: match net name, extract {num}, apply template
+        # Only for connectors NOT already renamed by explicit pin_renames
+        net_overrides = overrides.get('net_overrides', {})
+        if net_overrides:
+            for conn in connectors:
+                if id(conn) in renamed:
+                    continue
+                net = conn.get('net', '')
+                if not net:
+                    continue
+                for pattern, template in net_overrides.items():
+                    # Convert pattern like "/DeviceUnderTest/T{num}i" to a regex
+                    # {num} captures digits; other text is literal
+                    regex_pattern = re.escape(pattern).replace(r'\{num\}', r'(\d+)')
+                    m = re.match(regex_pattern, net)
+                    if m:
+                        new_name = template.replace('{num}', m.group(1))
+                        conn['name'] = new_name
+                        break
+
+        # Connector label overrides: prepend a footprint-level label to description
+        conn_labels = overrides.get('connector_labels', {})
+        if conn_labels:
+            # Build a mapping from refdes -> label, extracting refdes from descriptions
+            # Descriptions still have original form: "J4 pin 5 (Conn_01x10)" or "J17 (BarrelJack_Horizontal)"
+            import re as _re
+            for conn in connectors:
+                desc = conn['description']
+                # Match refdes at start of description: "J10.1", "J17", "J13 Port1"
+                m = _re.match(r'^([A-Z]+\d+)(?:[ .]|$)', desc)
+                if m:
+                    refdes = m.group(1)
+                    if refdes in conn_labels:
+                        conn['description'] = f'{conn_labels[refdes]} — {desc}'
 
     title = name.replace('_', ' ').replace('-', ' ').title()
     fzp = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -575,8 +766,7 @@ def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
            f'  <connectors>\n')
 
     for conn in connectors:
-        fzp += (f'    <connector id="{conn["id"]}" type="{conn["type"]}">\n'
-                f'      <title>{conn["name"]}</title>\n'
+        fzp += (f'    <connector id="{conn["id"]}" name="{conn["name"]}" type="{conn["type"]}">\n'
                 f'      <description>{conn["description"]}</description>\n'
                 f'      <views>\n'
                 f'        <breadboardView>\n'
@@ -605,7 +795,7 @@ def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
             bus_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', net_name.lstrip('/'))
             fzp += f'    <bus id="{bus_id}">\n'
             for cid in cids:
-                fzp += f'      <member connectorId="{cid}"/>\n'
+                fzp += f'      <nodeMember connectorId="{cid}"/>\n'
             fzp += f'    </bus>\n'
         fzp += '  </buses>\n'
 
@@ -613,7 +803,7 @@ def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
             '  <modules/>\n'
             '</module>\n')
 
-    fzp_path = output_dir / f'part.{module_id}.fzp'
+    fzp_path = output_dir / f'{name}.fzp'
     with open(fzp_path, 'w') as f:
         f.write(fzp)
 
@@ -640,6 +830,12 @@ def main():
                    help='Comma-separated PCBdraw libs (default: KiCAD-base,kicad-3d)')
     p.add_argument('--style', default=None,
                    help='PCBdraw --style argument (e.g. "oshpark-purple")')
+    p.add_argument('--pcbdraw-cwd', type=Path, default=None,
+                   help='Working directory for pcbdraw (default: step2svg dir)')
+    p.add_argument('--hide-back', action='store_true',
+                   help='Run pcbdraw_back_under.py to hide back-side components')
+    p.add_argument('--back-under', type=Path, default=None,
+                   help='Path to pcbdraw_back_under.py (auto-detected from board dir by default)')
     p.add_argument('--rebuild-lib', action='store_true',
                    help='Run build_kicad3d_lib.py before plotting')
     p.add_argument('--keep-raw', action='store_true',
@@ -648,6 +844,8 @@ def main():
                    help='Base filename for outputs (default: board stem)')
     p.add_argument('--temp-dir', type=Path, default=None,
                    help='Temporary working directory (default: output_dir/tmp)')
+    p.add_argument('--overrides', type=Path, default=None,
+                   help='JSON file with connector name overrides')
     p.add_argument('--raw-svg', type=Path, default=None,
                    help='Use existing raw PcbDraw SVG instead of running pcbdraw')
     p.add_argument('--extra', nargs=argparse.REMAINDER, default=[],
@@ -705,14 +903,44 @@ def main():
         cmd += extra
         cmd += [str(kicad_file), str(raw_svg)]
 
+        pcbdraw_cwd = args.pcbdraw_cwd.resolve() if args.pcbdraw_cwd else SCRIPT_DIR
+
         try:
-            subprocess.run(cmd, cwd=str(SCRIPT_DIR), check=True,
+            subprocess.run(cmd, cwd=str(pcbdraw_cwd), check=True,
                            capture_output=True, text=True)
             print(f"  PcbDraw SVG: {raw_svg}")
         except subprocess.CalledProcessError as e:
             sys.exit(f"PcbDraw failed (exit {e.returncode}):\n{e.stderr}")
         except FileNotFoundError:
             sys.exit(f"pcbdraw not found at {args.pcbdraw}")
+
+    # ── Step 3b: Hide back-side components (optional) ────────────────
+    if args.hide_back:
+        if not args.back_under:
+            # Auto-detect pcbdraw_back_under.py next to the board file
+            candidate = kicad_file.parent / 'pcbdraw_back_under.py'
+            if candidate.exists():
+                back_under_py = candidate
+            else:
+                back_under_py = None
+        else:
+            back_under_py = args.back_under.resolve()
+
+        if back_under_py and back_under_py.exists():
+            print(f"  Hiding back-side components via {back_under_py.name}...")
+            hidden_svg = raw_svg.with_name(raw_svg.stem + '_hidden.svg')
+            try:
+                subprocess.run(
+                    [sys.executable, str(back_under_py), str(raw_svg),
+                     '-o', str(hidden_svg)],
+                    check=True, capture_output=True, text=True,
+                )
+                # Replace raw with hidden version
+                raw_svg = hidden_svg
+            except subprocess.CalledProcessError as e:
+                print(f"  Warning: back-under failed:\n{e.stderr}")
+        else:
+            print("  Warning: --hide-back requested but pcbdraw_back_under.py not found")
 
     # ── Step 4: Build Fritzing part SVGs ───────────────────────────────
     print(f"\n→ Generating Fritzing part in: {output_dir}")
@@ -730,7 +958,7 @@ def main():
     img_bb  = f'breadboard/{module_id}_breadboard.svg'
     img_sch = f'schematic/{module_id}_schematic.svg'
     img_ico = f'icon/{module_id}_icon.svg'
-    fzp_file = f'part.{module_id}.fzp'
+    fzp_file = f'{base}.fzp'
 
     # Wrap PcbDraw SVG into Fritzing format with connector markers
     print(f"  Wrapping PcbDraw SVG as PCB view...")
@@ -756,10 +984,21 @@ def main():
     print(f"  Generating icon...")
     generate_icon_svg(output_dir / svg_ico)
 
+    # ── Load overrides ─────────────────────────────────────────────────
+    overrides = {}
+    if args.overrides:
+        ov_path = args.overrides.resolve()
+        if ov_path.exists():
+            with open(ov_path) as f:
+                overrides = json.load(f)
+            print(f"  Loaded overrides: {ov_path}")
+        else:
+            print(f"  Warning: overrides file not found: {ov_path}")
+
     # ── Step 5: Generate FZP ───────────────────────────────────────────
     print(f"  Generating FZP part descriptor...")
     generate_fzp(pcb, output_dir, base,
-                 img_bb, img_sch, img_ico, img_pcb)
+                 img_bb, img_sch, img_ico, img_pcb, overrides=overrides)
 
     # ── Step 6: Create .fzpz archive ───────────────────────────────────
     fzpz_path = output_dir / f'{base}.fzpz'
