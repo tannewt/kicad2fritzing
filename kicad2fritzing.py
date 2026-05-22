@@ -267,6 +267,10 @@ class PCBParser:
                 else:
                     net = get_str(net_node, 1, '')
 
+            # Extract pin function (e.g. 'GPIO9/ADC_10')
+            pinfunc_node = find_first(pad_node, 'pinfunction')
+            pinfunc = get_str(pinfunc_node, 1, '') if pinfunc_node else ''
+
             pads.append({
                 'name': pad_name,
                 'type': pad_type,
@@ -276,6 +280,7 @@ class PCBParser:
                 'drill': drill,
                 'layers': pad_layers,
                 'net': net,
+                'pinfunc': pinfunc,
             })
 
         self.footprints.append({
@@ -628,6 +633,66 @@ def generate_icon_svg(output_path: Path):
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  MCU pin tracing
+# ══════════════════════════════════════════════════════════════════════════
+
+def _append_mcu_pin_info(pcb: PCBParser, connectors: list):
+    """Trace each connector's net back through resistors to find MCU/ESP32
+    pin names, and append them to the connector description."""
+    # Build net map from all footprints
+    net_map = {}  # net -> [(refdes, pad_num, pinfunc, fp_name)]
+    for fp in pcb.footprints:
+        ref = fp['ref']
+        for pad in fp['pads']:
+            net = pad.get('net', '')
+            if net:
+                net_map.setdefault(net, []).append({
+                    'ref': ref,
+                    'pad': pad['name'],
+                    'pinfunc': pad.get('pinfunc', ''),
+                    'fp_name': fp['name'],
+                })
+
+    # Find MCU footprints (by looking for MCU-like names)
+    mcu_keywords = ['ESP32', 'ESP32-P4', 'MCU', 'Microcontroller', 'RP2040', 'STM32', 'SAMD']
+    mcu_refs = []
+    for fp in pcb.footprints:
+        if any(kw in fp['name'] for kw in mcu_keywords):
+            mcu_refs.append(fp['ref'])
+    
+    if not mcu_refs:
+        return  # No MCU found
+    
+    # For each connector with a net, try to trace to an MCU pin
+    for conn in connectors:
+        net = conn.get('net', '')
+        if not net:
+            continue
+        
+        # Trace: connector pad on this net -> resistor -> MCU pin
+        # First, find resistors on this net
+        r_on_net = [(r['ref'], r['pad']) for r in net_map.get(net, [])
+                     if 'Resistor' in r['fp_name']]
+        
+        for r_ref, r_pad in r_on_net:
+            # Find the OTHER pad of this resistor
+            other_pad = '1' if r_pad == '2' else '2'
+            for other_net, pads in net_map.items():
+                if other_net == net:
+                    continue
+                if any(p['ref'] == r_ref and p['pad'] == other_pad for p in pads):
+                    # Found the other net. Check if any MCU is on it.
+                    for mcu_ref in mcu_refs:
+                        mcu_pads = [p for p in net_map.get(other_net, [])
+                                    if p['ref'] == mcu_ref]
+                        if mcu_pads:
+                            pin_func = mcu_pads[0].get('pinfunc', '')
+                            if pin_func:
+                                conn['description'] += f' \u2192 {mcu_ref} {pin_func}'
+                            break
+                    break
+
+# ══════════════════════════════════════════════════════════════════════════
 #  FZP generator
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -722,6 +787,9 @@ def generate_fzp(pcb: PCBParser, output_dir: Path, name: str,
                     refdes = m.group(1)
                     if refdes in conn_labels:
                         conn['description'] = f'{conn_labels[refdes]} — {desc}'
+
+    # ── Trace ESP32/MCU pins and append to descriptions ───────────
+    _append_mcu_pin_info(pcb, connectors)
 
     title = name.replace('_', ' ').replace('-', ' ').title()
     fzp = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
