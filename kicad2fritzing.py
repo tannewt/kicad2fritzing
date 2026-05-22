@@ -477,7 +477,7 @@ def wrap_pcbdraw_svg_for_fritzing(pcbdraw_svg_path: Path, output_path: Path,
         vb_w = vb_h = 100.0
 
     scale = FRITZING_SCALE
-    margin_mm = 5
+    margin_mm = 0
     # Compute viewBox origin in Fritzing units (includes margin)
     off_x = (vb_x - margin_mm) * scale
     off_y = (vb_y - margin_mm) * scale
@@ -487,17 +487,6 @@ def wrap_pcbdraw_svg_for_fritzing(pcbdraw_svg_path: Path, output_path: Path,
     # Normalized viewBox starting at (0, 0) — Fritzing units, 100 = 1 inch
     result = svg_header(svg_w / 100, svg_h / 100,
                         viewbox=f"0 0 {svg_w:.4f} {svg_h:.4f}")
-
-    # Board fill (in Fritzing units, shifted to viewBox origin)
-    board_x_f = pcb.board_x * scale - off_x
-    board_y_f = pcb.board_y * scale - off_y
-    board_w_f = pcb.board_w * scale
-    board_h_f = pcb.board_h * scale
-    result += f'  <g id="boardFill">\n'
-    result += f'    <rect x="{board_x_f:.4f}" y="{board_y_f:.4f}" '
-    result += f'width="{board_w_f:.4f}" height="{board_h_f:.4f}" '
-    result += f'fill="#2b5f82" stroke="none"/>\n'
-    result += f'  </g>\n'
 
     # Copper1 — PcbDraw content, transform from mm to Fritzing units
     result += f'  <g id="copper1" transform="translate({-off_x:.4f}, {-off_y:.4f}) scale({scale:.6f})">\n'
@@ -556,7 +545,7 @@ def generate_schematic_svg(pcb: PCBParser, output_path: Path,
     """Generate a schematic view SVG — simplified pin diagram."""
     board_w = 120
     board_h = 80
-    margin = 5
+    margin = 3
 
     svg = svg_header((board_w + 2 * margin) / 100.0,
                      (board_h + 2 * margin) / 100.0,
