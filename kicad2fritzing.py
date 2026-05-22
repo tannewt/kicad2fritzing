@@ -688,7 +688,11 @@ def _append_mcu_pin_info(pcb: PCBParser, connectors: list):
                         if mcu_pads:
                             pin_func = mcu_pads[0].get('pinfunc', '')
                             if pin_func:
-                                conn['description'] += f' \u2192 {mcu_ref} {pin_func}'
+                                # Extract just GPIO name (e.g. 'GPIO9' from 'GPIO9/ADC_10')
+                                import re as _re
+                                m = _re.match(r'(GPIO\d+)', pin_func)
+                                if m:
+                                    conn['description'] = m.group(1)
                             break
                     break
 
