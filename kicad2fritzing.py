@@ -53,7 +53,7 @@ from pathlib import Path
 # ── Project paths (relative to step2svg repo) ─────────────────────────────
 
 SCRIPT_DIR     = Path(__file__).resolve().parent
-DEFAULT_PCBDRAW = "/tmp/pcbdraw-venv/bin/pcbdraw"
+DEFAULT_PCBDRAW = "pcbdraw"
 STEP2SVG       = SCRIPT_DIR / "step2svg.py"
 BUILD_LIB      = SCRIPT_DIR / "build_kicad3d_lib.py"
 KICAD3D_LIB    = SCRIPT_DIR / "kicad-3d"           # PCBdraw library dir
@@ -977,9 +977,25 @@ def main():
 
         pcbdraw_cwd = args.pcbdraw_cwd.resolve() if args.pcbdraw_cwd else SCRIPT_DIR
 
+        # Auto-detect KiCad's pcbnew module path and set PYTHONPATH
+        env = os.environ.copy()
+        try:
+            import pcbnew
+        except ImportError:
+            # Try common KiCad install paths
+            for kicad_path in [
+                '/usr/lib/python3/dist-packages',
+                '/usr/lib/python3.14/site-packages',
+                '/usr/share/kicad/lib/python3/dist-packages',
+            ]:
+                candidate = Path(kicad_path) / 'pcbnew.py'
+                if candidate.exists():
+                    env['PYTHONPATH'] = kicad_path + ':' + env.get('PYTHONPATH', '')
+                    break
+
         try:
             subprocess.run(cmd, cwd=str(pcbdraw_cwd), check=True,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
             print(f"  PcbDraw SVG: {raw_svg}")
         except subprocess.CalledProcessError as e:
             sys.exit(f"PcbDraw failed (exit {e.returncode}):\n{e.stderr}")
